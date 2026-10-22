@@ -439,184 +439,6 @@ def plot_network_flow(
 
     return fig, ax
 
-def check_line_loading1(network, snapshot=None, limit_pct=80.0, show_plot=True):
-    """
-    Check line loading after pf() or optimize().
-
-    Parameters
-    ----------
-    network    : pypsa.Network  (after pf() or optimize())
-    snapshot   : int, label, or None  (None = check ALL snapshots)
-    limit_pct  : float  — warning threshold in % of s_nom (default 80%)
-    show_plot  : bool   — bar chart of loading
-
-    Returns
-    -------
-    df : DataFrame with loading details
-    """
-
-    # ── Get flow data ──────────────────────────────────────────────────────────
-    if network.lines_t.p0.empty:
-        print("ERROR: network.lines_t.p0 is empty — run network.pf() or "
-              "network.optimize() first.")
-        return None
-
-    if snapshot is None:
-        # Use snapshot with worst-case (max) loading across all lines
-        loading_all = network.lines_t.p0.abs().div(network.lines.s_nom) * 100
-        worst_snap  = loading_all.max(axis=1).idxmax()
-        print(f"No snapshot specified — showing worst-case snapshot: {worst_snap}")
-        snap = worst_snap
-    elif isinstance(snapshot, int):
-        snap = network.snapshots[snapshot]
-    else:
-        snap = snapshot
-
-    p0 = network.lines_t.p0.loc[snap]    # MW, from bus0 to bus1
-
-    # Also get p1 if available (losses = p0 + p1)
-    if not network.lines_t.p1.empty:
-        p1   = network.lines_t.p1.loc[snap]
-        loss = (p0 + p1).abs()           # MW lost in line
-    else:
-        p1   = None
-        loss = None
-
-    # ── Build results table ────────────────────────────────────────────────────
-    rows = []
-    for line, row in network.lines.iterrows():
-        flow_mw    = float(p0.get(line, 0.0))
-        s_nom      = row['s_nom']
-        try:
-            loading    = abs(flow_mw) / s_nom * 100      # %
-        except:
-            loading = 0
-        headroom   = s_nom * (limit_pct / 100) - abs(flow_mw)
-        direction  = f"{row['bus0']} → {row['bus1']}" if flow_mw >= 0 \
-                     else f"{row['bus1']} → {row['bus0']}"
-
-        if loading >= 100:
-            status = '🔴 CRITICAL'
-        elif loading >= limit_pct:
-            status = '🟠 OVERLOADED'
-        elif loading >= limit_pct * 0.75:
-            status = '🟡 WARNING'
-        else:
-            status = '🟢 OK'
-
-        r = {
-            'line':         line,
-            'v_nom_kV':     int(row['v_nom']),
-            'bus0':         row['bus0'],
-            'bus1':         row['bus1'],
-            'direction':    direction,
-            's_nom_MVA':    round(s_nom, 1),
-            'flow_MW':      round(flow_mw, 2),
-            'loading_pct':  round(loading, 2),
-            'headroom_MW':  round(headroom, 2),
-            'status':       status,
-        }
-        if loss is not None:
-            r['loss_MW'] = round(float(loss.get(line, 0.0)), 3)
-
-        rows.append(r)
-
-    df = pd.DataFrame(rows).sort_values('loading_pct', ascending=False)
-
-    # ── Console summary ────────────────────────────────────────────────────────
-    n_critical   = (df['status'] == '🔴 CRITICAL').sum()
-    n_overloaded = (df['status'] == '🟠 OVERLOADED').sum()
-    n_warning    = (df['status'] == '🟡 WARNING').sum()
-    n_ok         = (df['status'] == '🟢 OK').sum()
-
-    print(f"\n{'═'*65}")
-    print(f"  LINE LOADING REPORT — Snapshot: {snap}")
-    print(f"  Security limit: {limit_pct}% of s_nom")
-    print(f"{'═'*65}")
-    print(f"  🔴 Critical  (≥100%)  : {n_critical}  lines")
-    print(f"  🟠 Overloaded(≥{limit_pct}%) : {n_overloaded}  lines")
-    print(f"  🟡 Warning   (≥{limit_pct*0.75:.0f}%) : {n_warning}  lines")
-    print(f"  🟢 OK                 : {n_ok}  lines")
-    print(f"{'─'*65}")
-
-    # Print overloaded / warning lines only
-    flagged = df[df['status'] != '🟢 OK']
-    if flagged.empty:
-        print("  ✅ All lines within limits.")
-    else:
-        print(f"  {'Line':<28} {'kV':>4} {'Flow':>8} {'s_nom':>8} "
-              f"{'Load%':>7} {'Headroom':>10}  Status")
-        print(f"  {'─'*28} {'─'*4} {'─'*8} {'─'*8} "
-              f"{'─'*7} {'─'*10}  {'─'*10}")
-        for _, r in flagged.iterrows():
-            print(f"  {r['line']:<28} {r['v_nom_kV']:>4} "
-                  f"{r['flow_MW']:>7.1f}MW {r['s_nom_MVA']:>7.1f}  "
-                  f"{r['loading_pct']:>6.1f}% {r['headroom_MW']:>8.1f}MW  "
-                  f"{r['status']}")
-
-    print(f"\n  Most loaded line : {df.iloc[0]['line']}  "
-          f"({df.iloc[0]['loading_pct']:.1f}%)")
-    print(f"  Least loaded line: {df.iloc[-1]['line']}  "
-          f"({df.iloc[-1]['loading_pct']:.1f}%)")
-    if loss is not None:
-        total_loss = df['loss_MW'].sum()
-        total_gen  = network.generators_t.p.loc[snap].sum()
-        print(f"  Total line losses: {total_loss:.2f} MW  "
-              f"({total_loss/total_gen*100:.2f}% of generation)")
-    print(f"{'═'*65}\n")
-
-    # ── Bar chart ──────────────────────────────────────────────────────────────
-    if show_plot:
-        fig, ax = plt.subplots(figsize=(16, max(6, len(df) * 0.28)))
-        fig.patch.set_facecolor('#f5f5f0')
-        ax.set_facecolor('#eaf0f6')
-
-        colors = []
-        for s in df['status']:
-            if   '🔴' in s: colors.append('#cc0000')
-            elif '🟠' in s: colors.append('#ff6600')
-            elif '🟡' in s: colors.append('#ffaa00')
-            else:            colors.append('#2ca02c')
-
-        bars = ax.barh(df['line'], df['loading_pct'],
-                       color=colors, edgecolor='white',
-                       linewidth=0.5, height=0.7)
-
-        # Limit lines
-        ax.axvline(x=limit_pct, color='#ff6600', linewidth=1.8,
-                   linestyle='--', label=f'Security limit ({limit_pct}%)')
-        ax.axvline(x=100, color='#cc0000', linewidth=1.8,
-                   linestyle='-',  label='Thermal limit (100%)')
-
-        # Value labels on bars
-        for bar, val in zip(bars, df['loading_pct']):
-            ax.text(bar.get_width() + 0.5, bar.get_y() + bar.get_height() / 2,
-                    f'{val:.1f}%', va='center', ha='left', fontsize=7,
-                    color='#333333')
-
-        ax.set_xlabel('Line Loading (%)', fontsize=11)
-        ax.set_title(f'Line Loading — Snapshot: {snap}\n'
-                     f'Security limit: {limit_pct}% | '
-                     f'Overloaded: {n_overloaded+n_critical} lines',
-                     fontsize=12, fontweight='bold', color='#1a1a2e')
-        ax.set_xlim(0, max(df['loading_pct'].max() * 1.15, 110))
-        ax.legend(fontsize=9, loc='lower right')
-        ax.grid(axis='x', linestyle='--', linewidth=0.4,
-                color='#cccccc', alpha=0.8)
-        ax.tick_params(labelsize=8)
-        for spine in ax.spines.values():
-            spine.set_edgecolor('#cccccc')
-
-        plt.tight_layout()
-        plt.savefig('line_loading.png', dpi=150, bbox_inches='tight')
-        plt.show()
-
-    return df
-
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-
 
 def check_line_loading(network, snapshot=None, limit_pct=80.0, ax=None, title_prefix=""):
     """
@@ -651,7 +473,10 @@ def check_line_loading(network, snapshot=None, limit_pct=80.0, ax=None, title_pr
 
     # ── Build results table ───────────────────────────────────────────────────
     flow_mw = p0.reindex(network.lines.index).fillna(0.0)
-    s_nom = network.lines['s_nom']
+    #s_nom = network.lines['s_nom']
+    #print('s_nom',s_nom)
+    s_nom = network.lines['s_nom_opt']
+    #print('s_nom_opt',s_nom_opt)
     loading_pct = (flow_mw.abs() / s_nom * 100).fillna(0)
 
     status = pd.cut(
@@ -713,3 +538,120 @@ def check_line_loading(network, snapshot=None, limit_pct=80.0, ax=None, title_pr
         plt.show()
 
     return df
+
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+
+def line_utilization_share(network, thresholds=(75.0,), use_s_nom_opt=True,
+                           plot=True, ax=None, title_prefix="", plot_threshold=None):
+    """
+    Percentage of the year each line is loaded above given % of its rated capacity.
+
+    Parameters
+    ----------
+    network        : pypsa.Network (after pf() or optimize())
+    thresholds     : float or iterable of float. Loading levels in % of rating,
+                     e.g. (50, 75, 90, 100). A snapshot counts when
+                     |p0| / rating * 100 >= threshold.
+    use_s_nom_opt  : bool. True uses s_nom_opt (falls back to s_nom where it is
+                     missing or zero); False uses s_nom.
+    plot           : bool. Draw a horizontal bar chart for one threshold.
+    ax             : matplotlib Axes or None.
+    title_prefix   : str. Prepended to the plot title (e.g. scenario name).
+    plot_threshold : float or None. Threshold shown in the plot
+                     (None = the first threshold).
+
+    Returns
+    -------
+    df : DataFrame indexed by line with
+         - rating_MVA
+         - mean_loading_pct, max_loading_pct
+         - hours_above_<t>  and  pct_year_above_<t>  for each threshold t
+         sorted by the first threshold's pct_year, descending.
+         A final 'AVERAGE' row gives the mean across lines.
+    """
+    if network.lines_t.p0.empty:
+        raise ValueError("network.lines_t.p0 is empty. Run network.pf() or network.optimize() first.")
+
+    if np.isscalar(thresholds):
+        thresholds = (thresholds,)
+    thresholds = [float(t) for t in thresholds]
+
+    # ── Rating ────────────────────────────────────────────────────────────────
+    rating = network.lines['s_nom'].copy()
+    if use_s_nom_opt and 's_nom_opt' in network.lines.columns:
+        opt = network.lines['s_nom_opt']
+        rating = opt.where(opt > 0, network.lines['s_nom'])
+    rating = rating.replace(0, np.nan)
+
+    # ── Loading per snapshot (% of rating) ────────────────────────────────────
+    flow = network.lines_t.p0.abs()
+    loading = flow.div(rating, axis=1) * 100
+
+    # ── Snapshot weights (hours each snapshot represents) ─────────────────────
+    w = network.snapshot_weightings
+    weights = w['objective'] if 'objective' in w.columns else w.iloc[:, 0]
+    weights = weights.reindex(loading.index).fillna(1.0)
+    total_hours = weights.sum()
+
+    # ── Build results ─────────────────────────────────────────────────────────
+    df = pd.DataFrame({
+        'rating_MVA': rating.round(1),
+        'mean_loading_pct': loading.mul(weights, axis=0).sum().div(total_hours).round(2),
+        'max_loading_pct': loading.max().round(2),
+    })
+
+    for t in thresholds:
+        hours = (loading >= t).mul(weights, axis=0).sum()
+        df[f'hours_above_{t:g}'] = hours.round(1)
+        df[f'pct_year_above_{t:g}'] = (hours / total_hours * 100).round(2)
+
+    first_col = f'pct_year_above_{thresholds[0]:g}'
+    df = df.sort_values(first_col, ascending=False)
+
+    avg = df.mean(numeric_only=True).round(2)
+    avg.name = 'AVERAGE'
+    df = pd.concat([df, avg.to_frame().T])
+
+    # ── Console summary ───────────────────────────────────────────────────────
+    label = title_prefix or "network"
+    summary = " | ".join(f">={t:g}%: {df.loc['AVERAGE', f'pct_year_above_{t:g}']:.1f}% of year"
+                         for t in thresholds)
+    print(f"[{label}] Average across {len(df) - 1} lines, {total_hours:.0f} h | {summary}")
+
+    # ── Plot ──────────────────────────────────────────────────────────────────
+    if plot:
+        pt = float(plot_threshold) if plot_threshold is not None else thresholds[0]
+        col = f'pct_year_above_{pt:g}'
+        if col not in df.columns:
+            raise ValueError(f"plot_threshold {pt:g} not in thresholds {thresholds}")
+
+        data = df.drop(index='AVERAGE')[col].sort_values()
+        standalone = ax is None
+        if standalone:
+            fig, ax = plt.subplots(figsize=(10, max(4, len(data) * 0.3)))
+
+        colors = plt.cm.RdYlGn_r(data.values / 100.0)
+        bars = ax.barh(data.index, data.values, color=colors, edgecolor='white', height=0.7)
+        ax.axvline(df.loc['AVERAGE', col], color='#333333', lw=1.5, linestyle='--',
+                   label=f"Average ({df.loc['AVERAGE', col]:.1f}%)")
+        for bar, val in zip(bars, data.values):
+            ax.text(bar.get_width() + 0.5, bar.get_y() + bar.get_height() / 2,
+                    f'{val:.1f}%', va='center', fontsize=7)
+
+        ax.set_xlim(0, 105)
+        ax.set_xlabel(f'% of year loaded at or above {pt:g}% of rated capacity')
+        ax.set_title(f'{title_prefix}\nTime above {pt:g}% of rating', fontsize=11, fontweight='bold')
+        ax.legend(fontsize=8, loc='lower right')
+        ax.grid(axis='x', linestyle='--', linewidth=0.4, alpha=0.8)
+        ax.tick_params(labelsize=7)
+        if standalone:
+            plt.tight_layout()
+            plt.show()
+
+    return df
+
+

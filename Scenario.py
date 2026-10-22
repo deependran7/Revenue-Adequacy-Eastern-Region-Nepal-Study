@@ -91,7 +91,7 @@ def Scenario_Analysis(network, Hydro_Cost_per_MW, line_transformer_cost,load_gro
     )
 
     # Expansion bounds
-    network.lines['s_nom_min']        = network.lines['s_nom']
+    network.lines['s_nom_min']        = network.lines['s_nom']*0.0 #########################################check this
     network.lines['s_nom_max']        = network.lines['s_nom'] * MAX_CIRCUITS
     network.lines['s_nom_extendable'] = True
 
@@ -112,7 +112,7 @@ def Scenario_Analysis(network, Hydro_Cost_per_MW, line_transformer_cost,load_gro
     annual_transformer_cost      = overnight_transformer_per_mw * annuity_factor  # Rs/MW/yr
 
     network.transformers['s_nom_extendable'] = True
-    network.transformers['s_nom_min']        = network.transformers['s_nom']
+    network.transformers['s_nom_min']        = network.transformers['s_nom']*0.0####################################
     network.transformers['s_nom_max']        = 100 * network.transformers['s_nom']
     network.transformers['capital_cost']     = annual_transformer_cost/Cost_Scale
 
